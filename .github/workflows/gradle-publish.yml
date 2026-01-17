@@ -18,7 +18,7 @@ jobs:
           sudo apt update
           sudo apt install -y \
             build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
-            libssl-dev libreadline-dev libffi-dev libbz2-dev wget openjdk-11-jdk \
+            libssl-dev libreadline-dev libffi-dev libbz2-dev wget openjdk-17-jdk \
             unzip python3-pip python3-setuptools python3-wheel
           
           # 下载并编译 Python 3.8.19
@@ -35,15 +35,18 @@ jobs:
           pip install --upgrade pip setuptools wheel
           python --version
 
-      # 2. 配置 JDK 11 环境
-      - name: 配置 JDK 11
+      # 2. 配置 JDK 17 环境（核心修改：升级到 Java 17）
+      - name: 配置 JDK 17
         run: |
-          sudo update-alternatives --set java /usr/lib/jvm/java-11-openjdk-amd64/bin/java
-          sudo update-alternatives --set javac /usr/lib/jvm/java-11-openjdk-amd64/bin/javac
-          echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> $GITHUB_ENV
+          sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+          sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> $GITHUB_ENV
           echo "GRADLE_OPTS=-Xmx4g -Dorg.gradle.daemon=false" >> $GITHUB_ENV
+          # 验证 Java 版本
+          java -version
+          javac -version
 
-      # 3. 配置 Android SDK（核心修复：解决 sdkmanager command not found）
+      # 3. 配置 Android SDK（适配 Java 17，解决版本兼容）
       - name: 配置 Android SDK 环境
         run: |
           # 定义 SDK 根目录（家目录，无权限问题）
@@ -61,19 +64,16 @@ jobs:
           unzip -q /tmp/sdk-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
           mv -f $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest || true
           
-          # 【核心修复】立即导出环境变量到当前 shell
+          # 立即导出环境变量到当前 shell
           export ANDROID_HOME=$ANDROID_SDK_ROOT
           export ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT
           export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH
+          export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
           
-          # 验证 sdkmanager 是否可用
+          # 验证环境
           echo "当前 PATH: $PATH"
+          echo "Java 版本: $(java -version 2>&1 | head -1)"
           echo "sdkmanager 路径: $(which sdkmanager || echo '未找到')"
-          if ! command -v sdkmanager &> /dev/null; then
-              echo "❌ sdkmanager 仍未找到，检查目录结构："
-              ls -R $ANDROID_SDK_ROOT/cmdline-tools
-              exit 1
-          fi
           
           # 接受 SDK 许可（避免交互）
           mkdir -p $ANDROID_SDK_ROOT/licenses
@@ -114,12 +114,12 @@ jobs:
         run: |
           find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "gradle.properties" \) -exec sed -i 's#D:/Programs/Python/Python38/python.exe#/usr/bin/python#g' {} \;
           
-          # 生成 local.properties（使用修复后的 SDK 路径）
+          # 生成 local.properties（更新 JDK 17 路径）
           cat > local.properties << EOF
           sdk.dir=${{ env.ANDROID_SDK_ROOT }}
           chaquopy.python.buildPython=/usr/bin/python
           chaquopy.python.version=3.8
-          org.gradle.java.home=/usr/lib/jvm/java-11-openjdk-amd64
+          org.gradle.java.home=/usr/lib/jvm/java-17-openjdk-amd64
           pyramid.chaquopy.python.buildPython=/usr/bin/python
           EOF
           
