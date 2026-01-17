@@ -43,30 +43,53 @@ jobs:
           echo "JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64" >> $GITHUB_ENV
           echo "GRADLE_OPTS=-Xmx4g -Dorg.gradle.daemon=false" >> $GITHUB_ENV
 
-      # 3. 配置 Android SDK（核心：安装到家目录，避开权限问题）
-      - name: 配置 Android SDK 环境（家目录版）
+      # 3. 配置 Android SDK（核心修复：解决 sdkmanager command not found）
+      - name: 配置 Android SDK 环境
         run: |
-          # 核心修改：SDK 安装到 runner 家目录，无需 sudo
+          # 定义 SDK 根目录（家目录，无权限问题）
           ANDROID_SDK_ROOT="$HOME/android-sdk"
-          # 直接创建目录（家目录有完全权限）
           mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
           
-          # 下载命令行工具
+          # 下载 SDK 工具（失败则退出）
           wget https://dl.google.com/android/repository/commandlinetools-linux-10406996_latest.zip -O /tmp/sdk-tools.zip
+          if [ $? -ne 0 ]; then
+            echo "❌ 下载 SDK 工具失败"
+            exit 1
+          fi
+          
+          # 解压并调整目录结构（sdkmanager 必需）
           unzip -q /tmp/sdk-tools.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
+          mv -f $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest || true
           
-          # 配置环境变量（关键：使用家目录路径）
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH" >> $GITHUB_ENV
+          # 【核心修复】立即导出环境变量到当前 shell
+          export ANDROID_HOME=$ANDROID_SDK_ROOT
+          export ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT
+          export PATH=$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH
           
-          # 接受 SDK 许可（家目录直接创建，无权限问题）
+          # 验证 sdkmanager 是否可用
+          echo "当前 PATH: $PATH"
+          echo "sdkmanager 路径: $(which sdkmanager || echo '未找到')"
+          if ! command -v sdkmanager &> /dev/null; then
+              echo "❌ sdkmanager 仍未找到，检查目录结构："
+              ls -R $ANDROID_SDK_ROOT/cmdline-tools
+              exit 1
+          fi
+          
+          # 接受 SDK 许可（避免交互）
           mkdir -p $ANDROID_SDK_ROOT/licenses
           echo "24333f8a63b6825ea9c5514f83c2829b004d1fee" > $ANDROID_SDK_ROOT/licenses/android-sdk-license
           
-          # 安装 SDK 组件（无需 sudo）
-          sdkmanager --sdk_root=$ANDROID_SDK_ROOT --no_https "platforms;android-33" "build-tools;33.0.2" "build-tools;30.0.3" "platform-tools"
+          # 安装 SDK 组件（指定 sdk_root，关闭 HTTPS）
+          sdkmanager --sdk_root=$ANDROID_SDK_ROOT --no_https \
+            "platforms;android-33" \
+            "build-tools;33.0.2" \
+            "build-tools;30.0.3" \
+            "platform-tools"
+          
+          # 写入环境变量供后续步骤使用
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "PATH=$PATH" >> $GITHUB_ENV
 
       # 4. 克隆项目
       - id: get-project
@@ -76,18 +99,22 @@ jobs:
             echo "❌ 未找到 project-to-build 文件"
             exit 1
           fi
-          PROJECT_URL=$(cat project-to-build | tr -d ' \n\r')
+          PROJECT_URL=$(cat project-to-build | tr -d ' \n\r\t' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          if [ -z "$PROJECT_URL" ]; then
+            echo "❌ project-to-build 文件内容为空"
+            exit 1
+          fi
           rm -rf 项目
-          git clone --depth=1 $PROJECT_URL 项目 || { echo "❌ 克隆失败"; exit 1; }
+          git clone --depth=1 $PROJECT_URL 项目 || { echo "❌ 克隆失败：$PROJECT_URL"; exit 1; }
+          echo "✅ 项目克隆成功"
 
       # 5. 全局替换 Python 路径
       - name: 全局替换 Python 路径（含 pyramid 模块）
         working-directory: ./项目
         run: |
-          find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "gradle.properties" \) | \
-            xargs sed -i 's#D:/Programs/Python/Python38/python.exe#/usr/bin/python#g'
+          find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "gradle.properties" \) -exec sed -i 's#D:/Programs/Python/Python38/python.exe#/usr/bin/python#g' {} \;
           
-          # 核心：local.properties 中使用家目录的 SDK 路径
+          # 生成 local.properties（使用修复后的 SDK 路径）
           cat > local.properties << EOF
           sdk.dir=${{ env.ANDROID_SDK_ROOT }}
           chaquopy.python.buildPython=/usr/bin/python
@@ -96,32 +123,51 @@ jobs:
           pyramid.chaquopy.python.buildPython=/usr/bin/python
           EOF
           
-          grep -r "D:/Programs/Python/Python38/python.exe" . || echo "✅ 无残留 Windows 路径"
+          # 验证替换结果
+          RESIDUAL_WIN_PATH=$(grep -r "D:/Programs/Python/Python38/python.exe" .)
+          if [ -n "$RESIDUAL_WIN_PATH" ]; then
+            echo "⚠️ 仍存在 Windows Python 路径残留："
+            echo "$RESIDUAL_WIN_PATH"
+          else
+            echo "✅ 无残留 Windows 路径"
+          fi
 
       # 6. 构建 APK + 优化查找逻辑
       - name: 构建应用并查找 APK
         working-directory: ./项目
         run: |
+          # 确保 gradlew 存在并可执行
           if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version 7.5 --distribution-type bin
+            echo "⚠️ 未找到 gradlew，生成 Gradle Wrapper"
+            gradle wrapper --gradle-version 7.5 --distribution-type bin || { echo "❌ Gradle Wrapper 生成失败"; exit 1; }
           fi
           chmod +x gradlew
           
-          ./gradlew assembleNormalDebug --no-daemon --stacktrace --max-workers 1
+          # 执行构建
+          ./gradlew assembleNormalDebug --no-daemon --stacktrace --max-workers 1 || {
+            echo "❌ 构建失败，打印 Gradle 日志"
+            cat ~/.gradle/daemon/7.5/daemon-*.log 2>/dev/null
+            exit 1
+          }
           
-          # 查找 APK
-          APK_FILES=$(find . -name "*.apk" -type f | grep -i debug)
+          # 查找 APK 文件
+          APK_FILES=$(find . -name "*.apk" -type f | grep -Ei "debug|normalDebug" | sort)
           if [ -z "$APK_FILES" ]; then
-            APK_FILES=$(find . -name "*.apk" -type f)
+            APK_FILES=$(find . -name "*.apk" -type f | sort)
           fi
           
+          # 验证 APK 是否存在
           if [ -n "$APK_FILES" ]; then
-            echo -e "\n✅ 构建成功！APK 文件："
-            ls -lh $APK_FILES
-            echo "APK_PATHS=$APK_FILES" >> $GITHUB_ENV
+            echo -e "\n✅ 构建成功！APK 文件列表："
+            for apk in $APK_FILES; do
+              ls -lh "$apk"
+            done
+            echo "APK_PATHS<<EOF" >> $GITHUB_ENV
+            echo "$APK_FILES" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
           else
-            echo -e "\n❌ 未找到 APK，打印输出目录："
-            ls -lh ./app/build/outputs/
+            echo -e "\n❌ 未找到 APK 文件，打印输出目录："
+            ls -Rlh ./app/build/outputs/ 2>/dev/null || ls -Rlh ./build/outputs/ 2>/dev/null
             exit 1
           fi
 
@@ -132,3 +178,4 @@ jobs:
           name: android-normal-debug-apk
           path: ${{ env.APK_PATHS }}
           retention-days: 14
+          if-no-files-found: error
